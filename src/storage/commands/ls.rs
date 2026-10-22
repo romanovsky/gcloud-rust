@@ -1,19 +1,82 @@
-use std::io::Write;
-use std::process::{Command, Stdio};
-
 use crate::storage::{auth, http, uri};
 
 pub(crate) fn run(uri_str: &str, recursive: bool) -> crate::Result<()> {
     let gs = uri::parse(uri_str)?;
     let token = auth::access_token()?;
+    let entries = list_entries(&token, &gs.bucket, &gs.object, recursive)?;
 
-    for name in list_entries(&token, &gs.bucket, &gs.object, recursive)? {
-        if !name.is_empty() {
-            println!("gs://{}/{}", gs.bucket, name);
+    if recursive {
+        print_recursive_tree(&gs.bucket, &gs.object, &entries);
+    } else {
+        for name in &entries {
+            if !name.is_empty() {
+                println!("gs://{}/{}", gs.bucket, name);
+            }
         }
     }
 
     Ok(())
+}
+
+/// Prints objects grouped by parent directory with headers, matching
+/// `gcloud storage ls -r` output format:
+///
+///     gs://bucket/prefix/:
+///
+///     gs://bucket/prefix/subdir/:
+///     gs://bucket/prefix/subdir/file1
+///     gs://bucket/prefix/subdir/file2
+///
+fn print_recursive_tree(bucket: &str, prefix: &str, entries: &[String]) {
+    use std::collections::BTreeSet;
+
+    let mut dirs = BTreeSet::new();
+    // The query prefix itself is always a group header.
+    if !prefix.is_empty() {
+        dirs.insert(prefix.to_string());
+    }
+
+    for name in entries {
+        // Parent dir = everything up to and including the last '/'.
+        if let Some(slash) = name.rfind('/') {
+            let parent = &name[..=slash];
+            dirs.insert(parent.to_string());
+
+            // Insert intermediate dirs between the query prefix and the parent.
+            if let Some(rest) = parent.strip_prefix(prefix) {
+                let mut current = prefix.to_string();
+                for segment in rest.split('/') {
+                    if segment.is_empty() {
+                        continue;
+                    }
+                    current.push_str(segment);
+                    current.push('/');
+                    dirs.insert(current.clone());
+                }
+            }
+        }
+    }
+
+    let dir_list: Vec<_> = dirs.into_iter().collect();
+    for (i, dir) in dir_list.iter().enumerate() {
+        println!("gs://{}/{}:", bucket, dir);
+
+        // Objects whose immediate parent is this directory.
+        for name in entries {
+            let parent = match name.rfind('/') {
+                Some(i) => &name[..=i],
+                None => "",
+            };
+            if parent == dir.as_str() {
+                println!("gs://{}/{}", bucket, name);
+            }
+        }
+
+        // Blank separator between groups, but not after the last one.
+        if i + 1 < dir_list.len() {
+            println!();
+        }
+    }
 }
 
 /// Lists object (and, when non-recursive, common-prefix) names directly under
@@ -43,11 +106,17 @@ pub(crate) fn list_entries(
         }
 
         let body = http::get(token, &url)?;
-        let json = String::from_utf8(body).map_err(|_| "GCS returned a non-UTF8 response")?;
+        let resp: GcsListResponse = serde_json::from_slice(&body)
+            .map_err(|e| format!("failed to parse GCS response: {e}"))?;
 
-        entries.extend(run_jq(&json, "(.prefixes // [])[], (.items // [])[].name")?);
+        if let Some(prefixes) = resp.prefixes {
+            entries.extend(prefixes);
+        }
+        if let Some(items) = resp.items {
+            entries.extend(items.into_iter().map(|item| item.name));
+        }
 
-        match run_jq(&json, "(.nextPageToken // empty)")?.into_iter().next() {
+        match resp.next_page_token {
             Some(next) if !next.is_empty() => page_token = Some(next),
             _ => break,
         }
@@ -56,34 +125,15 @@ pub(crate) fn list_entries(
     Ok(entries)
 }
 
-/// Runs `jq -r <filter>` over `json`, returning one `String` per output line.
-fn run_jq(json: &str, filter: &str) -> crate::Result<Vec<String>> {
-    let mut child = Command::new("jq")
-        .arg("-r")
-        .arg(filter)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("failed to run `jq` ({e}). Is it installed and on PATH?"))?;
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GcsListResponse {
+    prefixes: Option<Vec<String>>,
+    items: Option<Vec<GcsObject>>,
+    next_page_token: Option<String>,
+}
 
-    child
-        .stdin
-        .take()
-        .expect("stdin was piped")
-        .write_all(json.as_bytes())?;
-
-    let output = child.wait_with_output()?;
-    if !output.status.success() {
-        return Err(format!(
-            "jq failed to parse the GCS response: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )
-        .into());
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::to_string)
-        .collect())
+#[derive(serde::Deserialize)]
+struct GcsObject {
+    name: String,
 }

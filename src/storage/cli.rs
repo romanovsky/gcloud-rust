@@ -7,7 +7,7 @@ pub(crate) enum Command {
 }
 
 pub(crate) const USAGE: &str = "\
-storage — a partial, dependency-free reimplementation of `gcloud storage`.
+storage — a partial reimplementation of `gcloud storage`.
 
 USAGE:
     gcloud-rust storage ls [-r|-R|--recursive] <gs://bucket[/prefix]>
@@ -18,8 +18,8 @@ USAGE:
 AUTH:
     Uses whatever account is active in `gcloud auth login` / `gcloud config`.
 
-REQUIRES ON PATH:
-    gcloud, curl, jq
+REQUIRES:
+    gcloud auth login (or GOOGLE_APPLICATION_CREDENTIALS set)
 ";
 
 /// Parses the arguments that follow the `storage` noun (e.g. `ls -r gs://...`).
