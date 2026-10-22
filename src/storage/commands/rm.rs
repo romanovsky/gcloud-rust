@@ -1,5 +1,5 @@
-use crate::commands::ls;
-use crate::{auth, http, uri};
+use crate::storage::commands::ls;
+use crate::storage::{auth, http, uri};
 
 pub(crate) fn run(uri_str: &str, recursive: bool) -> crate::Result<()> {
     let gs = uri::parse(uri_str)?;

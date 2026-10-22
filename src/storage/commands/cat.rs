@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use crate::{auth, http, uri};
+use crate::storage::{auth, http, uri};
 
 pub(crate) fn run(uri_str: &str) -> crate::Result<()> {
     let gs = uri::parse(uri_str)?;

@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use crate::{auth, http, uri};
+use crate::storage::{auth, http, uri};
 
 pub(crate) fn run(uri_str: &str, recursive: bool) -> crate::Result<()> {
     let gs = uri::parse(uri_str)?;

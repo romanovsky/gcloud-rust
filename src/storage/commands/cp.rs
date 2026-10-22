@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use crate::commands::ls;
-use crate::{auth, http, uri};
+use crate::storage::commands::ls;
+use crate::storage::{auth, http, uri};
 
 pub(crate) fn run(src: &str, dst: &str, recursive: bool) -> crate::Result<()> {
     match (src.starts_with("gs://"), dst.starts_with("gs://")) {
