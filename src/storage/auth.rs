@@ -13,7 +13,11 @@ use anyhow::{Context, bail};
 pub(crate) fn access_token() -> crate::Result<String> {
     match token_from_adc() {
         Ok(token) => Ok(token),
-        Err(_) => token_from_gcloud(),
+        // Don't silently discard the ADC failure: if the gcloud fallback also
+        // fails, the user needs to see *both* reasons, not just the second.
+        Err(adc_err) => token_from_gcloud().with_context(|| {
+            format!("could not get an access token: ADC failed ({adc_err:#}), and the gcloud fallback also failed")
+        }),
     }
 }
 
