@@ -1,10 +1,15 @@
 use std::path::PathBuf;
 
+use anyhow::{Context, bail};
+
 /// Fetches a short-lived OAuth2 access token by reading the local ADC
 /// (Application Default Credentials) file and exchanging the refresh token
-/// with Google's OAuth2 endpoint.  Falls back to `gcloud auth print-access-token`
-/// if the ADC file is missing or malformed, so `gcloud auth login` still works
-/// as the only prerequisite.
+/// with Google's OAuth2 endpoint directly. ADC is populated by
+/// `gcloud auth application-default login` -- a *different* credential store
+/// than the one `gcloud auth login` sets up for `gcloud auth
+/// print-access-token`. If the ADC file is missing or malformed, we fall back
+/// to shelling out to `gcloud auth print-access-token`, so either login flow
+/// works.
 pub(crate) fn access_token() -> crate::Result<String> {
     match token_from_adc() {
         Ok(token) => Ok(token),
@@ -34,14 +39,17 @@ struct TokenResponse {
 }
 
 fn token_from_adc() -> crate::Result<String> {
-    let path = adc_path().ok_or("could not determine ADC path")?;
+    let path = adc_path().context("could not determine ADC path")?;
     let data = std::fs::read_to_string(&path)
-        .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+        .with_context(|| format!("could not read {}", path.display()))?;
     let creds: AdcCredentials =
-        serde_json::from_str(&data).map_err(|e| format!("invalid ADC file: {e}"))?;
+        serde_json::from_str(&data).context("invalid ADC file")?;
 
     let resp = ureq::post("https://oauth2.googleapis.com/token")
         .header("Content-Type", "application/x-www-form-urlencoded")
+        .config()
+        .http_status_as_error(false)
+        .build()
         .send(
             format!(
                 "client_id={}&client_secret={}&refresh_token={}&grant_type=refresh_token",
@@ -49,13 +57,17 @@ fn token_from_adc() -> crate::Result<String> {
             )
             .as_bytes(),
         )
-        .map_err(|e| format!("OAuth2 token refresh failed: {e}"))?;
+        .context("OAuth2 token refresh request failed")?;
+
+    if !resp.status().is_success() {
+        bail!("OAuth2 token refresh failed: HTTP {}", resp.status().as_u16());
+    }
 
     let token_resp: TokenResponse = serde_json::from_reader(resp.into_body().into_reader())
-        .map_err(|e| format!("failed to parse token response: {e}"))?;
+        .context("failed to parse OAuth2 token response")?;
 
     if token_resp.access_token.is_empty() {
-        return Err("OAuth2 returned an empty access token".into());
+        bail!("OAuth2 returned an empty access token");
     }
 
     Ok(token_resp.access_token)
@@ -66,26 +78,23 @@ fn token_from_gcloud() -> crate::Result<String> {
     let output = std::process::Command::new("gcloud")
         .args(["auth", "print-access-token"])
         .output()
-        .map_err(|e| {
-            format!("failed to run `gcloud` ({e}). Is the Google Cloud SDK installed and on PATH?")
-        })?;
+        .context("failed to run `gcloud`. Is the Google Cloud SDK installed and on PATH?")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
+        bail!(
             "`gcloud auth print-access-token` failed: {}\nRun `gcloud auth login` first.",
             stderr.trim()
-        )
-        .into());
+        );
     }
 
     let token = String::from_utf8(output.stdout)
-        .map_err(|_| "gcloud returned a non-UTF8 access token")?
+        .context("gcloud returned a non-UTF8 access token")?
         .trim()
         .to_string();
 
     if token.is_empty() {
-        return Err("gcloud returned an empty access token; run `gcloud auth login`".into());
+        bail!("gcloud returned an empty access token; run `gcloud auth login`");
     }
 
     Ok(token)

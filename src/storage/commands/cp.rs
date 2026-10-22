@@ -1,13 +1,16 @@
 use std::path::{Path, PathBuf};
 
+use anyhow::{Context, bail};
+
 use crate::storage::commands::ls;
 use crate::storage::{auth, http, uri};
 
 pub(crate) fn run(src: &str, dst: &str, recursive: bool) -> crate::Result<()> {
     match (src.starts_with("gs://"), dst.starts_with("gs://")) {
-        (false, false) => Err("storage cp: at least one of SRC/DST must be a gs:// URI \
+        (false, false) => bail!(
+            "storage cp: at least one of SRC/DST must be a gs:// URI \
             (use the regular `cp` for local-to-local copies)"
-            .into()),
+        ),
         (false, true) => upload(src, dst, recursive),
         (true, false) => download(src, dst, recursive),
         (true, true) => server_side_copy(src, dst, recursive),
@@ -21,16 +24,13 @@ fn upload(local_src: &str, gs_dst: &str, recursive: bool) -> crate::Result<()> {
 
     if path.is_dir() {
         if !recursive {
-            return Err(format!(
-                "storage cp: {local_src} is a directory; pass -r/--recursive to copy directories"
-            )
-            .into());
+            bail!("storage cp: {local_src} is a directory; pass -r/--recursive to copy directories");
         }
         return upload_dir(path, gs_dst);
     }
 
     if !path.is_file() {
-        return Err(format!("storage cp: no such local file: {local_src}").into());
+        bail!("storage cp: no such local file: {local_src}");
     }
 
     upload_one(path, gs_dst)
@@ -39,11 +39,12 @@ fn upload(local_src: &str, gs_dst: &str, recursive: bool) -> crate::Result<()> {
 fn upload_one(local_path: &Path, gs_dst: &str) -> crate::Result<()> {
     let dst = uri::parse(gs_dst)?;
     if dst.object.is_empty() {
-        return Err("storage cp: destination must include an object name".into());
+        bail!("storage cp: destination must include an object name");
     }
 
     let token = auth::access_token()?;
-    put_object(&token, &dst.bucket, &dst.object, local_path)?;
+    put_object(&token, &dst.bucket, &dst.object, local_path)
+        .with_context(|| format!("uploading {}", local_path.display()))?;
     println!(
         "Uploaded {} to gs://{}/{}",
         local_path.display(),
@@ -63,7 +64,7 @@ fn upload_dir(local_root: &Path, gs_dst: &str) -> crate::Result<()> {
     let src_basename = local_root
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
-        .ok_or("storage cp: source directory has no name")?;
+        .context("storage cp: source directory has no name")?;
 
     let dst_is_container = dst.object.is_empty() || gs_dst.ends_with('/');
     let dst_prefix = effective_destination(&dst.object, &src_basename, dst_is_container);
@@ -72,8 +73,10 @@ fn upload_dir(local_root: &Path, gs_dst: &str) -> crate::Result<()> {
     let mut failures = Vec::new();
     for (local_path, rel) in &files {
         let object_name = join_path(&dst_prefix, rel);
-        if let Err(e) = put_object(&token, &dst.bucket, &object_name, local_path) {
-            failures.push(format!("{}: {e}", local_path.display()));
+        if let Err(e) = put_object(&token, &dst.bucket, &object_name, local_path)
+            .with_context(|| format!("uploading {}", local_path.display()))
+        {
+            failures.push(format!("{e:#}"));
         }
     }
 
@@ -94,9 +97,8 @@ fn put_object(token: &str, bucket: &str, object: &str, local_path: &Path) -> cra
 fn download(gs_src: &str, local_dst: &str, recursive: bool) -> crate::Result<()> {
     let src = uri::parse(gs_src)?;
     if src.object.is_empty() && !recursive {
-        return Err(
+        bail!(
             "storage cp: source must include an object name (pass --recursive to copy a whole bucket)"
-                .into(),
         );
     }
 
@@ -120,11 +122,10 @@ fn download(gs_src: &str, local_dst: &str, recursive: bool) -> crate::Result<()>
     let names = ls::list_entries(&token, &src.bucket, &listing_prefix, true)?;
     if names.is_empty() {
         if src.object.is_empty() {
-            return Err(format!(
+            bail!(
                 "storage cp: bucket gs://{} is empty, nothing to download",
                 src.bucket
-            )
-            .into());
+            );
         }
         // Not a directory-like prefix -- maybe it's an exact object name.
         return download_one(&token, &src, local_dst);
@@ -143,8 +144,10 @@ fn download(gs_src: &str, local_dst: &str, recursive: bool) -> crate::Result<()>
             continue;
         }
         let dest_path = Path::new(&dst_root).join(rel);
-        if let Err(e) = fetch_object(&token, &src.bucket, name, &dest_path) {
-            failures.push(format!("{name}: {e}"));
+        if let Err(e) = fetch_object(&token, &src.bucket, name, &dest_path)
+            .with_context(|| format!("downloading {name}"))
+        {
+            failures.push(format!("{e:#}"));
         }
     }
 
@@ -153,7 +156,8 @@ fn download(gs_src: &str, local_dst: &str, recursive: bool) -> crate::Result<()>
 
 fn download_one(token: &str, src: &uri::GsUri, local_dst: &str) -> crate::Result<()> {
     let dst_path = resolve_download_path(local_dst, &src.object);
-    fetch_object(token, &src.bucket, &src.object, &dst_path)?;
+    fetch_object(token, &src.bucket, &src.object, &dst_path)
+        .with_context(|| format!("downloading gs://{}/{}", src.bucket, src.object))?;
     println!(
         "Downloaded gs://{}/{} to {}",
         src.bucket,
@@ -168,10 +172,10 @@ fn fetch_object(token: &str, bucket: &str, object: &str, dest_path: &Path) -> cr
     let url =
         format!("https://storage.googleapis.com/storage/v1/b/{bucket}/o/{encoded}?alt=media");
     let body = http::get(token, &url)?;
-    if let Some(parent) = dest_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = dest_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
     }
     std::fs::write(dest_path, &body)?;
     Ok(())
@@ -198,13 +202,13 @@ fn server_side_copy(gs_src: &str, gs_dst: &str, recursive: bool) -> crate::Resul
 
     if !recursive {
         if src.object.is_empty() || dst.object.is_empty() {
-            return Err(
+            bail!(
                 "storage cp: both source and destination need an object name \
                  (pass --recursive for bucket-to-bucket copies)"
-                    .into(),
             );
         }
-        copy_one(&token, &src.bucket, &src.object, &dst.bucket, &dst.object)?;
+        copy_one(&token, &src.bucket, &src.object, &dst.bucket, &dst.object)
+            .with_context(|| format!("copying gs://{}/{}", src.bucket, src.object))?;
         println!(
             "Copied gs://{}/{} to gs://{}/{}",
             src.bucket, src.object, dst.bucket, dst.object
@@ -224,14 +228,15 @@ fn server_side_copy(gs_src: &str, gs_dst: &str, recursive: bool) -> crate::Resul
     let names = ls::list_entries(&token, &src.bucket, &listing_prefix, true)?;
     if names.is_empty() {
         if src.object.is_empty() || dst.object.is_empty() {
-            return Err(format!(
+            bail!(
                 "storage cp: nothing found under gs://{}/{}",
-                src.bucket, raw_prefix
-            )
-            .into());
+                src.bucket,
+                raw_prefix
+            );
         }
         // Not a directory-like prefix -- maybe it's an exact object name.
-        copy_one(&token, &src.bucket, &src.object, &dst.bucket, &dst.object)?;
+        copy_one(&token, &src.bucket, &src.object, &dst.bucket, &dst.object)
+            .with_context(|| format!("copying gs://{}/{}", src.bucket, src.object))?;
         println!(
             "Copied gs://{}/{} to gs://{}/{}",
             src.bucket, src.object, dst.bucket, dst.object
@@ -248,8 +253,10 @@ fn server_side_copy(gs_src: &str, gs_dst: &str, recursive: bool) -> crate::Resul
     for name in &names {
         let rel = name.strip_prefix(&listing_prefix).unwrap_or(name);
         let dst_object = join_path(&dst_prefix, rel);
-        if let Err(e) = copy_one(&token, &src.bucket, name, &dst.bucket, &dst_object) {
-            failures.push(format!("{name}: {e}"));
+        if let Err(e) = copy_one(&token, &src.bucket, name, &dst.bucket, &dst_object)
+            .with_context(|| format!("copying {name}"))
+        {
+            failures.push(format!("{e:#}"));
         }
     }
 
@@ -367,13 +374,12 @@ fn report(verb: &str, total: usize, failures: &[String]) -> crate::Result<()> {
     for f in failures {
         eprintln!("  failed: {f}");
     }
-    Err(format!(
+    bail!(
         "{} of {} {} operations failed",
         failures.len(),
         total,
         verb.to_lowercase()
-    )
-    .into())
+    );
 }
 
 #[cfg(test)]

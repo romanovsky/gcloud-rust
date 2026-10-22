@@ -1,3 +1,5 @@
+use anyhow::{Context, bail};
+
 use crate::storage::commands::ls;
 use crate::storage::{auth, http, uri};
 
@@ -7,13 +9,13 @@ pub(crate) fn run(uri_str: &str, recursive: bool) -> crate::Result<()> {
 
     if !recursive {
         if gs.object.is_empty() {
-            return Err(
+            bail!(
                 "storage rm: URI must include an object, e.g. gs://bucket/object \
                  (pass --recursive to delete a whole bucket)"
-                    .into(),
             );
         }
-        delete_one(&token, &gs.bucket, &gs.object)?;
+        delete_one(&token, &gs.bucket, &gs.object)
+            .with_context(|| format!("removing gs://{}/{}", gs.bucket, gs.object))?;
         println!("Removed gs://{}/{}", gs.bucket, gs.object);
         return Ok(());
     }
@@ -39,8 +41,10 @@ pub(crate) fn run(uri_str: &str, recursive: bool) -> crate::Result<()> {
     let total = names.len();
     let mut failures = Vec::new();
     for name in &names {
-        if let Err(e) = delete_one(&token, &gs.bucket, name) {
-            failures.push(format!("{name}: {e}"));
+        if let Err(e) =
+            delete_one(&token, &gs.bucket, name).with_context(|| format!("removing {name}"))
+        {
+            failures.push(format!("{e:#}"));
         }
     }
 
@@ -54,14 +58,15 @@ pub(crate) fn run(uri_str: &str, recursive: bool) -> crate::Result<()> {
         for f in &failures {
             eprintln!("  failed: {f}");
         }
-        return Err(format!("{} of {} deletions failed", failures.len(), total).into());
+        bail!("{} of {} deletions failed", failures.len(), total);
     }
 
     if gs.object.is_empty() {
         http::delete(
             &token,
             &format!("https://storage.googleapis.com/storage/v1/b/{}", gs.bucket),
-        )?;
+        )
+        .with_context(|| format!("removing bucket gs://{}", gs.bucket))?;
         println!("Removed bucket gs://{}", gs.bucket);
     }
 

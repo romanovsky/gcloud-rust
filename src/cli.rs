@@ -1,5 +1,5 @@
 const USAGE_HEADER: &str = "\
-gcloud-rust — a partial, dependency-free reimplementation of `gcloud`.
+gcloud-rust — a partial reimplementation of `gcloud`.
 
 AVAILABLE COMMAND GROUPS:
     storage
@@ -20,7 +20,10 @@ pub(crate) fn parse(mut args: impl Iterator<Item = String>) -> crate::Result<Com
     match args.next().as_deref() {
         Some("storage") => Ok(Command::Storage(crate::storage::cli::parse(args)?)),
         Some("-h") | Some("--help") | None => print_usage_and_exit(),
-        Some(other) => Err(format!("unknown command `{other}`\n\n{USAGE_HEADER}").into()),
+        Some(other) => Err(crate::UsageError(format!(
+            "unknown command `{other}`\n\n{USAGE_HEADER}"
+        ))
+        .into()),
     }
 }
 

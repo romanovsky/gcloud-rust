@@ -1,11 +1,13 @@
 use std::io::Write;
 
+use anyhow::bail;
+
 use crate::storage::{auth, http, uri};
 
 pub(crate) fn run(uri_str: &str) -> crate::Result<()> {
     let gs = uri::parse(uri_str)?;
     if gs.object.is_empty() {
-        return Err("storage cat: URI must include an object, e.g. gs://bucket/object".into());
+        bail!("storage cat: URI must include an object, e.g. gs://bucket/object");
     }
 
     let token = auth::access_token()?;

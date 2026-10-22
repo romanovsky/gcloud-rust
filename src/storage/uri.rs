@@ -7,7 +7,7 @@ pub(crate) struct GsUri {
 pub(crate) fn parse(s: &str) -> crate::Result<GsUri> {
     let rest = s
         .strip_prefix("gs://")
-        .ok_or_else(|| format!("not a gs:// URI: `{s}`"))?;
+        .ok_or_else(|| anyhow::anyhow!("not a gs:// URI: `{s}`"))?;
 
     let (bucket, object) = match rest.split_once('/') {
         Some((b, o)) => (b.to_string(), o.to_string()),
@@ -15,7 +15,7 @@ pub(crate) fn parse(s: &str) -> crate::Result<GsUri> {
     };
 
     if bucket.is_empty() {
-        return Err(format!("missing bucket name in `{s}`").into());
+        anyhow::bail!("missing bucket name in `{s}`");
     }
 
     Ok(GsUri { bucket, object })

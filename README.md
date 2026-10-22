@@ -1,15 +1,23 @@
 # gcloud-rust
 
-A partial, dependency-free reimplementation of `gcloud storage`.
+A partial reimplementation of `gcloud` in Rust.
+
+## Goal
+
+Replace the Python-based `gcloud` CLI with a fast, reliable Rust CLI — same commands, a fraction
+of the startup latency and no Python runtime/venv to manage.
 
 ## Requirements
 
-- Rust / Cargo
-- `gcloud` (authenticated: `gcloud auth login`)
-- `curl`
-- `jq`
+- Rust / Cargo (edition 2024)
+- One of:
+  - `gcloud auth application-default login` run once (preferred — read natively via ADC + OAuth2
+    refresh, no `gcloud` binary needed at runtime), or
+  - `gcloud auth login` with the `gcloud` CLI on `PATH` (fallback: shells out to
+    `gcloud auth print-access-token`)
 
-No crates.io dependencies — the binary shells out to `gcloud`, `curl`, and `jq` instead of linking an HTTP/auth crate.
+HTTP and JSON are handled natively (`ureq`, `serde_json`) — no `curl`/`jq` shell-outs. On the
+Walmart network, crates.io downloads are proxied through Artifactory; see `.cargo/config.toml`.
 
 ## Build
 
@@ -27,7 +35,31 @@ cargo test
 
 ```sh
 cargo run -- storage ls gs://bucket[/prefix]
+cargo run -- storage ls -r gs://bucket[/prefix]       # recursive, grouped output (matches `gcloud storage ls -r`)
 cargo run -- storage cat gs://bucket/object
-cargo run -- storage cp <src> <dst>   # local<->gs://, or gs://<->gs://
+cargo run -- storage cp <src> <dst>                    # local<->gs://, or gs://<->gs://
 cargo run -- storage rm gs://bucket/object
 ```
+
+Run `cargo run -- storage <command> --help` for per-command flag details.
+
+## Status
+
+`gcloud` has ~135 top-level command groups. Only `storage` is covered so far.
+
+| Command group | Status |
+|---|---|
+| `storage` | 🟡 Partial — `ls`, `cat`, `cp`, `rm` (see [Run](#run)) |
+
+### Not started
+
+Everything else, including the commonly-used groups:
+
+`compute`, `container`, `functions`, `run`, `sql`, `pubsub`, `iam`, `projects`, `config`, `auth`,
+`logging`, `monitoring`, `builds`, `artifacts`, `app`, `dns`, `kms`, `secrets`, `scheduler`,
+`deploy`, `spanner`, `bigtable`, `firestore`, `datastore`, `dataflow`, `dataproc`, `composer`,
+`endpoints`, `source`, `workflows`, `batch`, `redis`, `filestore`, `services`, `billing`,
+`resource-manager`, `organizations`, `org-policies`, `identity`, `bq`
+
+and the rest of the surface (access management, networking sub-groups, data/AI products, and
+niche/alpha products) — run `gcloud --help` for the complete list.
