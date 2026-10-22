@@ -1,0 +1,4 @@
+# Public crates.io proxy through Walmart Artifactory
+# See: https://confluence.walmart.com/pages/viewpage.action?pageId=3207638393
+[source.crates-io]
+registry = "sparse+https://cargo.ci.artifacts.walmart.com/artifactory/api/cargo/rust-lang-cargo-release-remote/index/"
