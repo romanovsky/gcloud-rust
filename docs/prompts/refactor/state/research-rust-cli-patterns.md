@@ -1,13 +1,25 @@
-# gcloud-rust: adopting Rust CLI best practices (dependency-free)
+# gcloud-rust: adopting Rust CLI best practices
 
-## Constraint that shapes everything below
+## Constraint that shaped this doc originally — since resolved
 
-Confirmed empirically (repeated `curl`/`cargo` tests this session): `static.crates.io` returns HTTP 403
-through the current network/proxy. **No crates.io dependency can be added** — not clap, not anyhow,
-not thiserror, not lexopt, not textwrap. Every insight below had to be filtered through "what is the
-underlying *pattern*, and can it be reproduced with only `std`?" rather than "which crate implements this."
-If the network constraint is lifted later, several Phase-3 deferrals below become easy crate installs
-instead of hand-rolled code — noted where relevant.
+This doc was originally written under the belief that **no crates.io dependency could be added**:
+repeated `curl`/`cargo` tests had shown `static.crates.io` returning HTTP 403 through the corporate
+proxy. Every finding below was filtered through "what's the underlying *pattern*, reproducible with only
+`std`?" instead of "which crate implements this?", on that basis.
+
+**That basis turned out to be wrong.** The 403 was real, but it meant "the public CDN is blocked," not
+"no dependency can be linked." Walmart runs an Artifactory proxy for crates.io
+(`cargo.ci.artifacts.walmart.com`, see
+[Cargo usage](https://confluence.walmart.com/pages/viewpage.action?pageId=3207638393)); pointing
+`.cargo/config.toml`'s `[source.crates-io]` at it unblocks normal `cargo build`/`cargo add` entirely. See
+`STATE.md` for the exact config and the still-open action item (that file isn't committed yet).
+
+This means most of the "if the network block lifts" notes originally scattered through Phase 3 below are
+no longer hypothetical — they've been acted on. Rather than rewrite every paragraph below to erase the
+dependency-free framing it was researched under (the underlying pattern research is still valid and still
+the right way to think about *this* project's scale), each phase item and the Phase 3 list are annotated
+with what was actually done. Treat the rest of this doc as "research done one way, partially executed a
+better way once circumstances changed" rather than a stale artifact.
 
 Research was done by two sub-agents fetching real source from GitHub (ripgrep, fd, bat, eza, zoxide,
 starship, git-delta) and the Rust CLI book (rust-cli.github.io/book). Findings below are attributed at
@@ -40,7 +52,15 @@ audited fact.
   and a `--` end-of-options terminator).
 - **Concrete gap this surfaced in our code**: we use `std::env::args()`, which **panics** on non-UTF-8
   argv. `cp` accepts local filesystem paths, which can be non-UTF-8 on Unix. `std::env::args_os()` is the
-  std-only fix for the *parsing* side (see Decision in Deferrals below re: how far we carry this).
+  std-only fix for the *parsing* side (see Decision in Deferrals below re: how far we carry this). **Still
+  unaddressed** — not touched by this session's work; see Phase 3 (`OsString` plumbing is still an explicit
+  non-goal, decision unchanged).
+
+> **Decision made once dependencies became available (see Phase 3 below): clap was evaluated and
+> explicitly rejected, not adopted.** The `-r`-is-overloaded-per-subcommand problem documented in
+> `STATE.md` (recursive for `cp`/`ls`/`rm`, byte-range for `cat`, region for `sign_url`) is structurally
+> the same class of problem that drove ripgrep off clap in the first place. `lexopt` remains a live,
+> lower-risk option — not yet adopted, no trigger to justify it yet at one real flag.
 
 ### 2. Project structuring
 
@@ -55,7 +75,8 @@ audited fact.
 - **Takeaway for us**: our current shape (`src/cli.rs` thin dispatcher → `src/storage/{cli,mod,auth,http,uri}.rs`
   + `src/storage/commands/{ls,cat,cp,rm}.rs`) already matches the pattern these projects converge on at
   our scale. No structural change recommended here — see Phase 3 for the one deferred refinement
-  (formalizing a `Run` trait like zoxide's) and why it's not worth doing yet.
+  (formalizing a `Run` trait like zoxide's) and why it's not worth doing yet. **Unchanged by this session**
+  — `storage/mod.rs` grew one small free function (`sanitize()`) but the module shape is identical.
 
 ### 3. Docs and user-facing messages
 
@@ -67,12 +88,14 @@ audited fact.
   **whole comment** becomes its `--help` detail. The maintainer explicitly modeled delta's own `-h`/`--help`
   split on ripgrep's, wanting help text "traveling with the executable" rather than living only in a README.
 - **fd / bat**: both gate colored output on `std::io::IsTerminal` (stable std, no crate) and the `NO_COLOR`
-  env var convention (`std::env::var_os("NO_COLOR")`), with the check written once and reused.
+  env var convention (`std::env::var_os("NO_COLOR")`), with the check written once and reused. **Done** —
+  `main.rs::use_color()`, gating the `error:` prefix.
 - **fd's `error.rs`**: a `SanitizeErr` trait strips control characters out of untrusted strings (e.g.
   filenames) before they reach the terminal, to prevent terminal-escape injection from attacker-controlled
-  file/object names.
+  file/object names. **Done** — `storage::sanitize()`, applied to every object name `ls` prints and to GCS
+  API error-body text (see New findings below for why the latter mattered more than expected).
 - **Rust CLI book**: recommends newline-delimited, type-tagged JSON for machine-readable output (citing
-  ripgrep's `--json`) when that need arises.
+  ripgrep's `--json`) when that need arises. Still deferred (Phase 3, unchanged).
 
 ### 4. Error handling
 
@@ -88,13 +111,18 @@ audited fact.
   specific exit code without printing anything twice. `main()` detects it via
   `Box<dyn Error>::downcast::<SilentExit>()` — **this downcast is real, stable std**
   (`std::error::Error`, stable since 1.3.0), so the pattern ports directly to our `Box<dyn std::error::Error>`
-  error type without anyhow.
+  error type without anyhow. **This is exactly the shape we ended up shipping**, except once anyhow became
+  available we used `anyhow::Error::downcast_ref` (same idea, anyhow's own implementation of the same
+  pattern) for `UsageError` instead of a hand-rolled `Box<dyn Error>` version — see Phase 1 item 3 below.
 - **Important correction caught while drafting this plan**: anyhow's `{:?}` prints the *whole* "Caused by:"
-  chain automatically. Our `Box<dyn std::error::Error>` does not — `{}`/`{:?}` on it only ever shows the
-  one error we're currently looking at. Adopting a `.context()`-style helper (below) is **inert** unless
-  `main.rs` also explicitly walks `.source()` and prints each link. Both halves are one deliverable.
+  chain automatically. Our original `Box<dyn std::error::Error>` did not — `{}`/`{:?}` on it only ever
+  showed the one error we're currently looking at. Adopting a `.context()`-style helper (below) is **inert**
+  unless `main.rs` also explicitly walks `.source()` and prints each link. Both halves are one deliverable.
+  **This directly informed the real implementation**: see Phase 2 item 4 below — `crate::Result` now *is*
+  `anyhow::Result`, so this correction became load-bearing rather than theoretical.
 - **Bugs found by actually running our binary** (not inferred — see Verification below): broken-pipe
-  handling is currently wrong, and per-subcommand `--help` doesn't work (two different ways).
+  handling was wrong, and per-subcommand `--help` didn't work (two different ways). **Both fixed** — see
+  Phase 1.
 
 ### 5. Dealing with string literals
 
@@ -109,13 +137,16 @@ audited fact.
 - Explicit scope check from research: ripgrep only built its templated help/doc system because it has
   ~100 flags. We have one real flag (`-r`) across four subcommands. **Do not import that machinery
   wholesale** — adopt the *shape* (help text next to the flag it documents) in a form proportional to our
-  current size.
+  current size. **Followed**: `storage/cli.rs` got four flat `*_HELP` string constants, not a trait/macro
+  system — proportional to one real flag.
 
 ---
 
 ## Verification done before writing this plan (observed, not inferred)
 
-Both suspected bugs were reproduced against the real binary before being written up as findings.
+Both suspected bugs were reproduced against the real binary before being written up as findings, and both
+have since been fixed and re-verified live (see "Implementation status" notes inline above and Phase 1
+below) — this section is kept as-is as the historical record of how they were *found*.
 
 - **`storage cat` piped into a reader that closes early**: `cargo run -q -- storage cat
   gs://cloud-samples-data/video/cat.mp4 | head -c 1` → stderr prints `error: Broken pipe (os error 32)`,
@@ -136,112 +167,151 @@ Both suspected bugs were reproduced against the real binary before being written
 
 ---
 
+## New findings from the ureq/anyhow migration (not part of the original research pass)
+
+These surfaced while actually implementing the plan below once dependencies were unblocked — they're new
+discoveries, not things the original dependency-free research could have anticipated.
+
+- **ureq 3.x silently drops HTTP error response bodies by default.** `http_status_as_error` defaults to
+  `true`, which collapses any 4xx/5xx into `Error::StatusCode(u16)` — just the number, no body. The
+  original curl-based implementation explicitly used `--fail-with-body` to keep GCS's JSON error detail
+  (`{"error":{"message": "The specified bucket does not exist."}}`), and a first-pass ureq port lost that
+  silently (it still compiled and looked correct). Caught by checking ureq's vendored source
+  (`error.rs`/`run.rs`/`config.rs`) rather than by a live failure, then confirmed fixed against a real 404.
+  Fix: `.config().http_status_as_error(false).build()` per request, then inspect `resp.status()` and read
+  the body manually in all cases. Lesson for future crate adoptions in this project: **check what a crate
+  silently drops by default before trusting its error `Display` is sufficient** — it rarely carries as
+  much detail as a hand-rolled curl invocation that was explicitly tuned for this API's error format.
+- **`ureq::Response` is `http::Response<ureq::Body>`, not ureq's own type** — the `http` crate had to be
+  added as an explicit direct `Cargo.toml` dependency (not just relying on it transitively through ureq)
+  because ureq doesn't re-export it. Minor, but worth knowing before assuming "we only added ureq."
+- **Two real `ls -r` formatting gaps**, found by live-diffing against real `gcloud storage ls -r` at bucket
+  shapes that hadn't been tested before (bucket-root, and a prefix that's itself a folder-placeholder
+  object) — full detail in `STATE.md`'s Known bugs section. Both fixed and covered by new unit tests in
+  `storage/commands/ls.rs` (`bucket_root_gets_its_own_header`, `placeholder_object_gets_bare_top_line`,
+  `no_placeholder_means_no_bare_top_line`). Mentioned here because it's a second instance of the same
+  lesson as above: **the only way these were found was diffing real output at shapes not previously
+  exercised** — code review / pattern research alone would not have surfaced either.
+
+---
+
 ## Implementation plan
 
-### Phase 1 — cheap, high-value, do first (bugs confirmed above)
+### Phase 1 — cheap, high-value, do first (bugs confirmed above) — ✅ ALL DONE
 
-1. **Fix broken-pipe handling.** In `src/main.rs`, before printing a top-level error, check whether it's
-   an `io::Error` with `kind() == BrokenPipe` and exit `0` silently instead:
+1. **Fix broken-pipe handling.** ✅ **Done**, with one change from the originally-planned shape: because
+   Phase 2 item 4 below wraps errors in `anyhow::Context` (not left as bare `io::Error` at the top level),
+   a single top-level `downcast_ref::<io::Error>()` would stop matching once `.context()` is attached
+   anywhere upstream. Implemented as a **chain walk** instead, from the start, rather than shipping the
+   naive version and fixing it later:
    ```rust
-   if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
-       if io_err.kind() == std::io::ErrorKind::BrokenPipe {
-           std::process::exit(0);
-       }
+   fn is_broken_pipe(e: &anyhow::Error) -> bool {
+       e.chain()
+           .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+           .any(|io_err| io_err.kind() == std::io::ErrorKind::BrokenPipe)
    }
    ```
-   Works today with zero other changes: `storage::commands::cat`'s `write_all(&body)?` propagates the raw
-   `io::Error` through `?` without being wrapped in a `format!(...)` string first, so it stays downcastable.
-   This is the same "inspect the concrete type in `main`" idiom zoxide uses for `SilentExit` — reusable
-   for item 3 below.
+   Confirmed live: `cargo run -- storage cat gs://cloud-samples-data/video/cat.mp4 | head -c1` → exit 0,
+   silent. Same "inspect the concrete type in `main`" idiom zoxide uses for `SilentExit`, now via
+   `anyhow::Error::chain()` instead of a single `Box<dyn Error>::downcast_ref`.
 
-2. **Wire up per-subcommand `-h`/`--help` — two call sites, not one.** `storage::cli::parse`'s `ls`/`cp`/`rm`
-   arms all go through `extract_recursive_flag`, which needs to recognize `-h`/`--help` and short-circuit
-   to that subcommand's help instead of erroring. `cat`'s arm has no flag-handling at all and needs its own
-   explicit check before treating the next argument as the URI. Don't fix only the shared helper and assume
-   `cat` is covered — it isn't (see Verification above).
+2. **Wire up per-subcommand `-h`/`--help` — two call sites, not one.** ✅ **Done.** The shared flag
+   extractor (renamed `extract_flags`, was `extract_recursive_flag`) now returns an enum
+   (`Flags::Help | Flags::Parsed { .. }`) instead of erroring on `-h`/`--help`, used by `ls`/`cp`/`rm`.
+   `cat`'s arm (no flag loop at all) got its own explicit check before treating the next token as the URI,
+   exactly as flagged — fixing only the shared helper would *not* have covered it. Confirmed live for all
+   four subcommands; each now prints its own long-form help text (see Phase 2 item 5).
 
-3. **Adopt a deliberate exit-code convention.** 0 = success, 1 = runtime/API error, 2 = usage error (bad
-   flags/missing arguments). Simplest implementation: give `storage::cli::parse`'s and the root `cli::parse`'s
-   error returns a distinguishable marker (e.g. wrap usage-stage errors in a small `UsageError(String)`
-   newtype implementing `Error`/`Display`), and have `main.rs` `downcast_ref::<UsageError>()` to choose
-   exit 2 vs 1 — same downcast idiom as item 1.
+3. **Adopt a deliberate exit-code convention.** ✅ **Done.** 0 = success, 1 = runtime/API error, 2 = usage
+   error (bad flags/missing arguments) — scoped exactly as planned, to `storage::cli::parse`'s and the root
+   `cli::parse`'s error returns only (not to deeper validation in `uri.rs` or `commands/*.rs`, which stay
+   plain runtime errors / exit 1). Implemented via a `UsageError(String)` marker type in `lib.rs`
+   (`Display`/`Error` impls, wraps into `anyhow::Error` via the blanket `From` impl), downcast in
+   `main.rs` via `anyhow::Error::downcast_ref::<UsageError>()` — same idiom as item 1, now using anyhow's
+   own downcast instead of `Box<dyn Error>`'s. Confirmed live: unknown flag / missing arg / unknown
+   subcommand → exit 2; bad URI / nonexistent bucket → exit 1.
 
-### Phase 2 — foundational, moderate effort
+### Phase 2 — foundational, moderate effort — ✅ ALL DONE, via anyhow instead of hand-rolled code
 
-4. **`.context()`-style error chaining, std-only — two parts, both required:**
-   - A small `Context` error type + `ResultExt::context(self, msg)` extension trait (≈20 lines), wrapping
-     the original error as `.source()` rather than discarding it:
-     ```rust
-     struct Context { msg: String, source: Box<dyn std::error::Error> }
-     impl std::error::Error for Context {
-         fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(self.source.as_ref()) }
-     }
-     ```
-   - **`main.rs` must walk the chain**, or the above is inert:
-     ```rust
-     eprintln!("error: {e}");
-     let mut cause = e.source();
-     while let Some(c) = cause {
-         eprintln!("  caused by: {c}");
-         cause = c.source();
-     }
-     ```
-   Apply `.context()` incrementally at points that currently lose detail in a batch loop — e.g. wrap each
-   `copy_one`/`fetch_object`/`put_object` failure inside `storage/commands/cp.rs`'s recursive loops with
-   which file/object it was, on top of the lower-level curl failure message already produced in `http.rs`.
+Originally planned as std-only (no crates available at the time). Once the Artifactory proxy unblocked
+dependencies, item 4 was built directly on `anyhow` instead — exactly the substitution this doc's own
+Phase 3 "if the network block lifts" note predicted for this item specifically; applied here, once deps
+were confirmed working, rather than waiting.
 
-   **Interaction with Phase 1 item 1**: that item's `e.downcast_ref::<std::io::Error>()` broken-pipe check
-   only works while the `BrokenPipe` error reaches `main` unwrapped, which is true today for `cat`'s
-   `write_all(&body)?`. If `.context()` is later applied to that same call site, it gets boxed inside
-   `Context` and the direct downcast stops matching. If that happens, update the broken-pipe check to walk
-   `.source()` (the same chain-walking loop this item already adds) looking for `io::ErrorKind::BrokenPipe`
-   at any link, not just at the top.
+4. **Error chaining — anyhow, not a hand-rolled `Context` type.** ✅ **Done.** `crate::Result<T>` is now
+   `anyhow::Result<T>` (`lib.rs`). Every error-construction site across the crate was migrated from
+   `Err("...".into())` / `.ok_or("...")?` (relying on std's `impl From<&str> for Box<dyn Error>`, which
+   anyhow deliberately does *not* provide) to `anyhow::bail!`/`anyhow!`/`.context()`/`.with_context()`.
+   `main.rs` walks the chain and prints each link:
+   ```rust
+   eprintln!("error: {e}");
+   for cause in e.chain().skip(1) {
+       eprintln!("  caused by: {cause}");
+   }
+   ```
+   (`.skip(1)` because `e.chain()`'s first item is the top-level error already shown via `{e}`.)
+   `.with_context()` applied exactly where the original plan called for it — `cp.rs`'s `put_object`/
+   `fetch_object`/`copy_one` calls inside the recursive batch loops, plus the equivalent `delete_one` loop
+   in `rm.rs`, each wrapped with which file/object it was, on top of the lower-level `http.rs` failure
+   message. Per-item failures in those batch loops are collected via `format!("{e:#}")` — anyhow's
+   alternate Display, which prints the full chain on one line (fd's convention, noted in the original
+   research) — rather than a hand-built, single-level string.
 
-5. **Split `USAGE` into short + long forms**, enabling item 2 above properly: one line per subcommand for
-   the top-level/`storage --help` view, a longer block per subcommand for `storage <cmd> --help`. Mirrors
-   delta/clap's first-line-vs-whole-comment convention, done by hand with two string constants per
-   subcommand instead of a doc-comment macro.
+5. **Split `USAGE` into short + long forms.** ✅ **Done**, enabling item 2 above. `storage::cli::USAGE`
+   is the short form (top-level/`storage --help`, and the tail of "unknown subcommand" errors);
+   `LS_HELP`/`CAT_HELP`/`CP_HELP`/`RM_HELP` are one constant each, shown by `storage <cmd> --help`. Hand-
+   written constants, not a doc-comment macro — proportional to one real flag, per the research's own
+   explicit scope check (dimension 5 above).
 
-6. **TTY/`NO_COLOR`-gated minimal color** (std-only, `std::io::IsTerminal` is stable since Rust 1.70 —
-   confirmed available, this toolchain is 1.99.1):
+6. **TTY/`NO_COLOR`-gated minimal color.** ✅ **Done**, exactly as planned:
    ```rust
    fn use_color() -> bool {
        std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none()
    }
    ```
-   Apply to the `error:` prefix at minimum. Cosmetic, cheap, low priority relative to items 1-5.
+   Applied to the `error:` prefix in `main.rs`. Still cosmetic/low-priority, as originally scoped.
 
-7. **Sanitize untrusted strings before printing** — object names from `storage ls` and any GCS error-body
-   text we echo come from outside our control. A small `fn sanitize(s: &str) -> String` stripping C0
-   control characters, applied at the print sites in `commands/ls.rs` and wherever an API error body is
-   surfaced, closes the same class of terminal-injection risk fd's `SanitizeErr` guards against.
+7. **Sanitize untrusted strings before printing.** ✅ **Done**, and turned out to matter more than
+   expected. `storage::sanitize()` (strips C0 control chars) is applied to every object name `ls` prints
+   (both the non-recursive and the grouped recursive formatter) **and** to GCS API error-body text now
+   that `http.rs` actually surfaces that text (see New findings above — before that fix, there was no
+   error-body text to sanitize in the first place, since it was being discarded).
 
-### Phase 3 — explicitly deferred (trigger-bound, not open questions)
+### Phase 3 — revisited now that dependencies are available; decisions made, not just deferred
 
-- **Per-flag trait/registry (ripgrep's `Flag` trait, scaled down).** Deferred until we add a *second* real
-  flag to any subcommand (e.g. `-n`/`--no-clobber` for `cp`). One flag doesn't justify the machinery; the
-  research explicitly notes ripgrep only built theirs because they have ~100 flags.
-- **Non-UTF-8 local path support (`OsString` plumbing).** **Decision, not an open question**: out of
-  scope for now. `Command::Cp { src: String, dst: String, .. }` stays `String`; non-UTF-8 local filenames
-  are unsupported. Revisit only if a real report surfaces — full `OsString` plumbing touches `cli.rs`,
-  every `commands/*.rs`, and `uri.rs`, which isn't justified speculatively.
-- **"Did you mean" fuzzy flag suggestions.** Low-priority polish; revisit only if time permits after
-  Phase 1/2 land.
-- **Formalize a `Run` trait across `commands/*`** (zoxide's shape). Deferred — our existing one-file-per-
-  subcommand layout already matches the pattern; only worth the extra indirection if dispatch logic grows
-  past a simple `match`.
-- **Machine-readable `--format=json` for `ls`.** Deferred until explicitly requested. Natural extension
-  point when asked (mirrors ripgrep's `--json`, the Rust CLI book's cited worked example).
-- **Full ripgrep-style templated help/man-page/completion generation.** Not justified at four commands;
-  the Phase 2 short/long split is the right-sized version of the same idea.
-- **If the network block lifts**: `lexopt` and `clap` both become realistic again (lexopt is a much smaller
-  dependency and maps closely onto the token-stream idiom already recommended above); `anyhow` would make
-  Phase 2 item 4 unnecessary; `thiserror` would simplify any future custom error enum.
+- **Per-flag trait/registry (ripgrep's `Flag` trait, scaled down).** Still deferred until we add a
+  *second* real flag to any subcommand. Unchanged.
+- **clap.** ✅ **Evaluated and explicitly rejected** (this is a decision, not an oversight or a "not yet").
+  Reasoning: real `gcloud storage`'s `-r` is overloaded per-subcommand (recursive for `cp`/`ls`/`rm`,
+  byte-range for `cat`, region for `sign_url` — confirmed against the actual Python SDK source, see
+  `STATE.md`'s Prior Research section) in exactly the way that drove ripgrep itself off clap (dimension 1
+  above). Adopting clap now would also put at risk the byte-exact `ls -r` output parity against real
+  `gcloud` that was just established via live diffing. The hand-rolled parser stays.
+- **lexopt.** Still an open, not-yet-adopted option — lower risk than clap since it's a lexer rather than
+  an opinionated parser (would preserve our own per-subcommand validation), but not justified yet at one
+  real flag. Revisit alongside the per-flag-registry trigger above, together, if either fires.
+- **anyhow.** ✅ **Adopted** — see Phase 2 item 4. No longer hypothetical.
+- **thiserror.** Still not adopted, and not clearly needed: the one custom error type we have
+  (`UsageError`) is a single-field marker, trivial to hand-write `Display`/`Error` for. thiserror's value
+  is deriving those across several enum variants — revisit if a real multi-variant error enum shows up.
+- **Non-UTF-8 local path support (`OsString` plumbing).** Still out of scope, decision unchanged.
+  `Command::Cp { src: String, dst: String, .. }` stays `String`. Note from dimension 1 above: this is now
+  slightly more clearly a real (if narrow) gap, not just a theoretical one, since `std::env::args()` does
+  panic on non-UTF-8 argv — still not prioritized without a real report.
+- **"Did you mean" fuzzy flag suggestions.** Still deferred, unchanged.
+- **Formalize a `Run` trait across `commands/*`** (zoxide's shape). Still deferred, unchanged — dispatch
+  is still a simple `match`.
+- **Machine-readable `--format=json` for `ls`.** Still deferred until explicitly requested, unchanged.
+- **Full ripgrep-style templated help/man-page/completion generation.** Still not justified at four
+  commands, unchanged.
 
 ---
 
 ## Suggested order of work
 
-Phase 1 (3 items) is small and fixes confirmed, reproducible bugs — do that first, independent of
-everything else. Phase 2 is the bulk of the "adopt real patterns" work and should land as one coherent
-pass (item 4's two halves must ship together). Phase 3 stays parked until its stated trigger occurs.
+Original ordering (Phase 1 first, Phase 2 as one coherent pass, Phase 3 parked) was followed as planned —
+**Phase 1 and Phase 2 are both complete**, Phase 2 landed as the anyhow-based version of the originally
+std-only plan rather than two separate passes, and Phase 3 now has explicit per-item decisions instead of
+blanket deferral. Remaining open items are exactly the still-deferred Phase 3 bullets above (none of their
+stated triggers have fired) plus the two things called out in `STATE.md`: `.cargo/config.toml`/
+`Cargo.lock` need committing, and `cp`/`rm` still need a real (disposable) bucket to verify live.

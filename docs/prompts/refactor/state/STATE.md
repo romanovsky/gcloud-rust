@@ -6,43 +6,97 @@ quick-orientation layer on top of it).
 
 ## What this project is
 
-A partial, **dependency-free** reimplementation of `gcloud storage` in Rust. "Dependency-free" is not a
-style choice — see the constraint below.
+A partial reimplementation of `gcloud storage` in Rust. Goal (see `README.md`): replace the
+Python-based `gcloud` CLI with a fast, reliable Rust CLI. **No longer dependency-free** — see below,
+this changed mid-project and invalidated the original constraint the research doc was written under.
 
-## Environment constraint — re-check before assuming it's stale
+## Dependency constraint — RESOLVED, was previously blocking
 
-`cargo build` / `cargo fetch` cannot download any crate. The corporate proxy returns HTTP 403 on
-`static.crates.io` for every package download (crate *metadata* via the sparse index works fine —
-`cargo add` itself succeeds — only the actual `.crate` tarball download is blocked). Confirmed repeatedly
-this session, independent of Cargo:
+Earlier sessions confirmed `static.crates.io` (the public crates.io CDN) returns HTTP 403 through the
+corporate proxy, and concluded no crates.io dependency could be linked. **That conclusion was wrong** —
+it conflated "the public CDN is blocked" with "no dependency can be added." Walmart runs an Artifactory
+proxy for crates.io, documented at
+[Cargo usage](https://confluence.walmart.com/pages/viewpage.action?pageId=3207638393). Pointing
+`[source.crates-io]` at it unblocks normal dependency downloads entirely:
+
+```toml
+# .cargo/config.toml
+[source.crates-io]
+registry = "sparse+https://cargo.ci.artifacts.walmart.com/artifactory/api/cargo/rust-lang-cargo-release-remote/index/"
+```
+
+**⚠️ `.cargo/config.toml` and `Cargo.lock` are untracked in git as of this writing** (`git status`
+shows both `??`). Source + `README.md` were committed (`4375875`), but without these two files a fresh
+clone cannot build — `cargo build` will hit the same 403 this section just described. Commit both
+before considering this done. (Flagged twice now — don't lose it a third time.)
+
+The original 403 finding itself was real and reproducible (confirmed independently via a direct `curl`
+against `static.crates.io`, with and without Cargo in the loop) — it just didn't mean what it was taken
+to mean. If `.cargo/config.toml` is ever missing/misconfigured, that exact symptom returns:
 
 ```sh
 curl -sS -o /dev/null -w "%{http_code}\n" https://static.crates.io/crates/cfg-if/1.0.5/download
+# 403 == proxy not configured / not taking effect; 200 would mean the raw CDN itself opened up
 ```
 
-A `200` here means the block has lifted and `clap`/`anyhow`/etc. become viable again — see the "if lifted"
-note at the end of `research-rust-cli-patterns.md` before changing the design on that basis.
+## Curl/jq/gcloud shell-outs — removed, replaced with crates
 
-Because of this, the binary shells out to three external programs instead of linking crates:
+Now that deps work, all three external-binary shell-outs the project used to depend on are gone:
 
-- `gcloud auth print-access-token` — auth (`src/storage/auth.rs`)
-- `curl` — all HTTP to the GCS JSON API; bearer token is passed via a `-K -` stdin config, never argv, so
-  it doesn't leak into `ps` output (`src/storage/http.rs`)
-- `jq` — JSON parsing of list responses (`src/storage/commands/ls.rs`)
+| Was | Now |
+|---|---|
+| `curl` (HTTP) | `ureq` 3.5 |
+| `jq` (JSON parsing) | `serde_json` + `serde` |
+| `gcloud auth print-access-token` (OAuth2) | Native ADC file read + direct OAuth2 refresh call |
 
-All three were confirmed present and working on this machine.
+**Auth detail, corrected from an earlier wrong assumption**: the native path reads
+`~/.config/gcloud/application_default_credentials.json` (or `$GOOGLE_APPLICATION_CREDENTIALS`), which
+is populated by `gcloud auth application-default login` — **not** `gcloud auth login`. Those are two
+separate credential stores. If the ADC file is missing/malformed, `storage/auth.rs` falls back to
+shelling out to `gcloud auth print-access-token`, which *does* need plain `gcloud auth login`. (An
+earlier version of this doc and the CLI's own `--help` text incorrectly said the native path needed
+`gcloud auth login` — fixed in both places.)
+
+**Both paths are now actually exercised, not just plausible on paper**: confirmed live with
+`GOOGLE_APPLICATION_CREDENTIALS=/nonexistent ./target/debug/gcloud-rust storage ls gs://cloud-samples-data/adc/`
+— ADC read fails, falls through to `gcloud auth print-access-token`, succeeds, correct listing returned.
+Also fixed a real error-swallow caught on review: the fallback match arm used to be `Err(_) =>
+token_from_gcloud()`, discarding the ADC failure reason entirely — if gcloud *also* failed, the user only
+ever saw the gcloud error with no clue the ADC path was even tried. Now the gcloud attempt is wrapped with
+`.with_context()` carrying the original ADC error inline, so a double-failure (confirmed live with both
+`GOOGLE_APPLICATION_CREDENTIALS` pointed at a bogus path and `gcloud` removed from `PATH`) prints both:
+```
+error: could not get an access token: ADC failed (could not read /nonexistent: ...), and the gcloud fallback also failed
+  caused by: failed to run `gcloud`. Is the Google Cloud SDK installed and on PATH?
+  caused by: No such file or directory (os error 2)
+```
+
+`gcloud` itself is therefore now only a fallback dependency, not a hard requirement, and `curl`/`jq` are
+gone entirely — `README.md`'s Requirements section reflects this.
+
+**A real bug this surfaced**: ureq 3.x's default behavior (`http_status_as_error: true`) collapses any
+4xx/5xx response into `Error::StatusCode(u16)` — the response **body is discarded**. The original curl
+implementation explicitly used `--fail-with-body` to keep GCS's JSON error detail
+(`{"error":{"message": "..."}}`), and the first ureq port silently lost that. Fixed in `storage/http.rs`
+by setting `.config().http_status_as_error(false).build()` per request and reading status+body manually.
+Confirmed against a real 404 (`gs://this-bucket-definitely-does-not-exist-xyz123/`) that the full GCS
+error body now surfaces, sanitized through the same `sanitize()` helper used for object names.
+
+`http` had to be added as an explicit direct dependency (`Cargo.toml`) — `ureq`'s `Response<Body>` is
+`http::Response<ureq::Body>`, and ureq does not re-export the `http` crate.
 
 ## Prior research — don't re-derive, and don't get this wrong
 
-Before the CLI-patterns research (above), a separate pass read the real `gcloud` Python SDK source
+Before the CLI-patterns research (below), a separate pass read the real `gcloud` Python SDK source
 (present on this machine at `/Users/s0r0mzn/Downloads/gs/google-cloud-sdk/lib/surface/storage/` and
 `.../googlecloudsdk/command_lib/storage/`) to establish ground truth for `gcloud storage`'s actual flag
 surface. Two load-bearing facts from that pass:
 
 - **`-r` is overloaded and means something different per subcommand** — recursive for `cp`/`ls`/`rm`/
   `rsync`, but **byte range** for `cat` (`-r 256-939`) and **region** for `sign_url`; `du`'s `-r` means
-  readable-sizes, not recursive. A future session must not add `-r` to `cat` expecting recursion — it
-  would contradict real `gcloud storage` semantics. `mv` is always-recursive internally with no flag at all.
+  readable-sizes, not recursive. This is the specific reason a derive-macro parser (clap) was rejected
+  when dependencies became available (see research doc) — clap models one meaning per flag name
+  globally, not per-subcommand-overloaded. `mv` is always-recursive internally with no flag at all.
 - Real `gcloud storage cp` has **~25+ flags**; our implementation covers exactly one (`-r`/`-R`/`--recursive`)
   deliberately — see Phase 3 of the research doc for when/how to grow that surface.
 - The recursive-`cp` **nest-vs-rename destination rule** we implemented (does `cp -r dir gs://b/dest` land
@@ -56,28 +110,29 @@ surface. Two load-bearing facts from that pass:
 src/
   main.rs, lib.rs, cli.rs      — thin top-level dispatcher (Command::Storage(...))
   storage/
-    mod.rs                      — pub(crate) Command, run() dispatch
-    cli.rs                      — storage subcommand parsing (Ls/Cat/Cp/Rm), USAGE text
+    mod.rs                      — pub(crate) Command, run() dispatch, sanitize() helper
+    cli.rs                      — storage subcommand parsing (Ls/Cat/Cp/Rm), short USAGE +
+                                   per-subcommand LS_HELP/CAT_HELP/CP_HELP/RM_HELP
     auth.rs, http.rs, uri.rs
     commands/{mod,ls,cat,cp,rm}.rs
 ```
 
 Deliberately shaped so a future command group (e.g. a `compute` noun) can be added as a sibling of
 `storage/` without touching storage's internals — one more match arm in root `cli.rs`/`lib.rs`, one more
-`print!` line in the top-level usage. (Rationale cross-checked against real-world Rust CLI project layouts
-— see dimension 2 in the research doc.)
+`print!` line in the top-level usage. `README.md` now has a Status table listing every other gcloud
+command group as not-started, for exactly this reason.
 
 ## What's implemented vs. actually verified live
 
 | Command | Implemented | Verified live |
 |---|---|---|
-| `storage ls` / `ls -r` | yes, with `nextPageToken` pagination | **yes** |
+| `storage ls` / `ls -r` | yes, with `nextPageToken` pagination, gcloud-matching group headers | **yes** |
 | `storage cat` | yes | **yes** |
 | `storage cp` (upload / download / gs↔gs, recursive + not) | yes | **no** |
 | `storage rm` / `rm -r` | yes | **no** |
 
-Safe, read-only, re-runnable smoke tests against a public bucket (no credentials beyond the local
-`gcloud auth login` session needed):
+Safe, read-only, re-runnable smoke tests against public buckets (no credentials beyond the local
+`gcloud auth login` / `gcloud auth application-default login` session needed):
 
 ```sh
 cargo run -q -- storage ls gs://cloud-samples-data/
@@ -85,43 +140,123 @@ cargo run -q -- storage ls -r gs://cloud-samples-data/bigquery/us-states/
 cargo run -q -- storage cat gs://cloud-samples-data/bigquery/us-states/us-states.csv
 ```
 
+**`ls -r` output format is now byte-for-byte diffed against real `gcloud storage ls -r`**, not just
+spot-checked, across three distinct real-bucket shapes:
+
+1. A prefix with no folder-placeholder object (`gs://adtech-prod-offsite-ydsp-ingress/drop_zone/impressions/`,
+   253 lines including headers) — exact match.
+2. A prefix that *is* itself a folder-placeholder object (`gs://cloud-samples-data/bigquery/us-states/`) —
+   exact match, including the extra bare top-line + blank line gcloud emits in this case (see Known bugs,
+   now fixed, below).
+3. True bucket root (empty prefix) — **not** diffed byte-for-byte live (the bucket used,
+   `cloud-samples-data`, is too large to fully enumerate inside a reasonable tool-call timeout — this
+   implementation collects every page before printing anything, so a `head`-truncated live run produces
+   zero output on our side long before gcloud's equivalent would, which is a timing artifact, not a
+   correctness signal). Instead verified by: (a) directly observing that real
+   `gcloud storage ls -r gs://cloud-samples-data/` does emit its own `gs://cloud-samples-data/:` root
+   header before descending (`timeout 20 ... | head -4`, confirmed), and (b) a deterministic unit test
+   (`bucket_root_gets_its_own_header` in `commands/ls.rs`) proving the formatter does the same for an
+   empty prefix. Don't upgrade this to "live-diffed" without actually doing it against a smaller
+   bucket-rooted scenario.
+
 **Standing caveat — don't lose this**: `cp` and `rm` have never been run against a real bucket end to end;
 this environment has no disposable/writable bucket. The single highest-risk unverified detail (whether
 `%2F`-encoded slashes in the `name=`/`prefix=` query parameters round-trip correctly on upload) *was*
-independently confirmed correct via a direct `curl` call against live GCS — see the research doc — but the
+independently confirmed correct via a direct call against live GCS — see the research doc — but the
 actual write/delete calls themselves are implemented-but-unexercised. Don't upgrade this to "verified"
 without actually running them against a bucket someone owns.
 
-`cargo build` and `cargo test` (15 tests across 3 suites) both pass clean as of this state.
+`cargo build`, `cargo test` (23 tests, up from 15), and `cargo clippy` all pass clean as of this state.
 
-## Known bugs (confirmed by running the binary — full repro detail in the research doc)
+## Known bugs — Phase 1's three are now FIXED (were open at last write-up)
 
-1. `storage cat <large-object> | head` → `error: Broken pipe (os error 32)`, exit 1, instead of a clean
-   exit 0. Only manifests once the object is bigger than the OS pipe buffer (a small test object hides it).
-2. Per-subcommand `--help` is broken, two different ways depending on the subcommand — see the research
-   doc's Verification section for the exact two error strings and why `cat` fails differently from
-   `ls`/`cp`/`rm`.
+1. ~~`storage cat <large-object> | head` → `error: Broken pipe (os error 32)`, exit 1~~ **Fixed.**
+   `main.rs` now walks the *whole* anyhow error chain (`e.chain().filter_map(downcast_ref::<io::Error>())`)
+   looking for `ErrorKind::BrokenPipe` at any link, not just a top-level downcast — deliberately chain-aware
+   because Phase 2's `.context()`/`.with_context()` adoption would otherwise wrap the original `io::Error`
+   and silently break a naive top-level-only check (this exact interaction was flagged before being
+   implemented, not discovered after). Confirmed live: `storage cat gs://cloud-samples-data/video/cat.mp4
+   | head -c1` → exit 0, nothing on stderr.
+2. ~~Per-subcommand `--help` broken two different ways~~ **Fixed**, both ways, separately:
+   `extract_flags` (used by `ls`/`cp`/`rm`) now returns a `Flags::Help` sentinel instead of erroring on
+   `-h`/`--help`; `cat`'s arm (which has no flag loop at all) got its own explicit check before treating
+   the next token as the URI. Confirmed live for all four subcommands.
 
-Both are Phase 1 items below.
+**Two new, previously-unknown `ls -r` formatting bugs were found (and fixed) while verifying the above**
+(not inferred — found by live-diffing against real `gcloud storage ls -r` on public buckets, which hadn't
+been done at bucket-root / placeholder-object shapes before):
+
+3. Bucket-root recursive listing (`storage ls -r gs://bucket/`, empty prefix) was silently skipping its
+   own `gs://bucket/:` header — the code special-cased "don't emit a header for an empty prefix," which
+   turned out to be wrong by inductive testing against three different non-empty prefixes plus a direct
+   check against real bucket-root output. Fixed by removing the special case; the formatting rule is just
+   "the queried prefix always gets a header," full stop.
+4. When the queried prefix is *itself* a literal object name (a GCS folder-placeholder/marker object —
+   common when a directory was created via the GCS console or `gsutil mkdir`-equivalent tooling), real
+   `gcloud storage ls -r` prints that object once more as a bare line (no trailing `:`) plus a blank line,
+   *before* any group headers. Confirmed against `gs://cloud-samples-data/bigquery/` and
+   `.../bigquery/us-states/`. Fixed by detecting `entries.iter().any(|e| e == prefix)` and emitting the
+   extra line only in that case — confirmed via unit test that it's a no-op when no such placeholder exists
+   (the far more common case, e.g. the adtech bucket this was first verified against).
+
+Exit-code convention (0 success / 1 runtime error / 2 usage error) is also now implemented, via a
+`UsageError` marker type (`lib.rs`) that `storage::cli::parse` and root `cli::parse` wrap usage-stage
+failures in, downcast in `main.rs` — same idiom zoxide uses for its `SilentExit` marker, now using
+`anyhow::Error::downcast_ref` instead of a bare `Box<dyn Error>`'s.
+
+## Known limitation, newly surfaced (not a regression, not yet fixed)
+
+`storage ls -r` fully enumerates every page of results (following `nextPageToken` to exhaustion) and
+builds the entire formatted output as one `String` *before* printing anything. For a prefix with a huge
+number of objects (observed trying to use true bucket-root on `gs://cloud-samples-data/` — likely
+hundreds of thousands of objects bucket-wide) this means no output at all appears until every page has
+been fetched, unlike real `gcloud` which appears to stream. This was already true before this session's
+changes (pre-existing in the original `list_entries`/print loop shape) and is not something Phase 1/2/3
+of the research doc called for fixing — noted here only because it was surfaced while verifying item 3
+above, and because it blocks doing a full live diff at true-bucket-root scale on a large bucket. Not
+scheduled; would need `list_entries` and the formatter restructured around streaming/incremental printing
+if it's ever prioritized.
 
 ## Next steps
 
-Full detail in `research-rust-cli-patterns.md`. Summary:
+Full detail in `research-rust-cli-patterns.md`. Summary, now that it's been executed:
 
-- **Phase 1 (small, do first)**: fix the two bugs above (note: the `--help` fix needs two separate code
-  changes, not one); adopt a 0/1/2 exit-code convention (success / runtime error / usage error) via the
-  same `downcast_ref::<T>()`-on-the-boxed-error idiom used for the broken-pipe fix.
-- **Phase 2 (moderate)**: a std-only `.context()` error-chaining helper, **shipped together with** a
-  `main.rs` change that walks `.source()` to print the chain (the helper alone is inert); split `USAGE`
-  into short/long forms to make Phase 1's per-subcommand help possible; `std::io::IsTerminal` + `NO_COLOR`
-  gated color on error output; sanitize untrusted strings (GCS object names, API error bodies) before
-  printing them.
-- **Phase 3 (explicitly deferred, trigger-bound — not open questions)**: a per-flag registry (defer until
-  a 2nd real flag is added anywhere); `OsString`/non-UTF-8 local path support (decided out of scope,
-  `String` stays as-is, revisit only on a real report); fuzzy "did you mean" flag suggestions; a `Run`
-  trait across `commands/*`; JSON output for `ls`.
+- **Phase 1 — done.** All three items (broken pipe, per-subcommand help, exit codes) fixed and verified
+  live, per Known bugs above.
+- **Phase 2 — done, via anyhow instead of hand-rolled std-only code**, since dependencies are available
+  now (this is exactly the doc's own "if the network block lifts" Phase-3 prediction for item 4, now
+  acted on for the whole phase, not just that one item):
+  - Item 4 (error chaining): `anyhow::Context`/`bail!`/`anyhow!` throughout, replacing the planned
+    hand-rolled `Context` struct. `.with_context()` applied at `cp.rs`/`rm.rs`'s batch-loop call sites
+    (`put_object`/`fetch_object`/`copy_one`/`delete_one`) and at every `http.rs` call, exactly where the
+    doc called out detail was being lost. Failures in batch loops print via `{:#}` (anyhow's alternate
+    Display, full inline chain) rather than a flattened hand-built string.
+  - Item 5 (short/long help split): done — `storage::cli::USAGE` (short) plus `LS_HELP`/`CAT_HELP`/
+    `CP_HELP`/`RM_HELP` (long, one per subcommand).
+  - Item 6 (TTY/NO_COLOR color): done, gates the `error:` prefix in `main.rs`.
+  - Item 7 (sanitize untrusted strings): done — `storage::sanitize()` strips C0 control chars, applied to
+    every object name printed by `ls` and to GCS API error-body text surfaced by `http.rs`.
+- **Phase 3 — revisited now that deps are available, decisions made (not just deferred):**
+  - **clap: explicitly rejected for now**, not just "not done yet." Reasoning: `-r` is overloaded
+    per-subcommand in real `gcloud storage` (recursive for most, byte-range for `cat`, region for
+    `sign_url` — see Prior Research above) in a way clap's per-flag-name model doesn't cleanly express,
+    which was the exact historical reason ripgrep itself moved *off* clap onto `lexopt`. Adopting it now
+    would also risk the byte-exact `ls -r` output parity that was just established against real `gcloud`.
+    Keep the hand-rolled parser.
+  - **lexopt: still an open option, not adopted.** Lower risk than clap (it's a lexer, not an opinionated
+    parser — preserves our own validation logic), but not justified yet at one real flag across four
+    subcommands. Revisit alongside the per-flag-registry trigger below.
+  - **thiserror: not adopted.** No multi-variant custom error enum exists yet (`UsageError` is a single
+    one-field marker type, trivial to hand-write); thiserror's value is deriving `Error`/`Display` across
+    several variants. Revisit if a real enum shows up.
+  - Everything else in the original Phase 3 list (per-flag registry, `OsString` plumbing, "did you mean"
+    suggestions, a `Run` trait, JSON output for `ls`) is still deferred, unchanged from the original
+    research doc — none of their triggers have occurred.
 
 ## Repo / git state
 
-Working tree has uncommitted changes on top of commit `020034e`. Nothing from this session has been
-committed — ask before committing, per standing instruction.
+As of this write-up: source (`src/`), `Cargo.toml`, and `README.md` are committed (`4375875`,
+"refactor + update docs"). **`.cargo/config.toml` and `Cargo.lock` are still untracked** (`git status`
+shows `??` for both) — see the dependency-constraint section above for why this is blocking for anyone
+else cloning the repo. `.idea/` is also untracked and should probably be gitignored rather than committed.
+Ask before committing, per standing instruction.
