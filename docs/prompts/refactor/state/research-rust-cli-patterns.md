@@ -7,12 +7,11 @@ repeated `curl`/`cargo` tests had shown `static.crates.io` returning HTTP 403 th
 proxy. Every finding below was filtered through "what's the underlying *pattern*, reproducible with only
 `std`?" instead of "which crate implements this?", on that basis.
 
-**That basis turned out to be wrong.** The 403 was real, but it meant "the public CDN is blocked," not
-"no dependency can be linked." Walmart runs an Artifactory proxy for crates.io
-(`cargo.ci.artifacts.walmart.com`, see
-[Cargo usage](https://confluence.walmart.com/pages/viewpage.action?pageId=3207638393)); pointing
-`.cargo/config.toml`'s `[source.crates-io]` at it unblocks normal `cargo build`/`cargo add` entirely. See
-`STATE.md` for the exact config and the still-open action item (that file isn't committed yet).
+**That basis turned out to be wrong.** The 403 was real, but it meant "the public CDN is blocked on this
+network," not "no dependency can be linked." That earlier development environment sat behind a network
+that required pointing `[source.crates-io]` at a private registry mirror via a repo-local
+`.cargo/config.toml`; that file has since been removed; this is a public repo and builds against the
+plain public crates.io registry. See `STATE.md`'s dependency-constraint section for the current state.
 
 This means most of the "if the network block lifts" notes originally scattered through Phase 3 below are
 no longer hypothetical — they've been acted on. Rather than rewrite every paragraph below to erase the
@@ -233,8 +232,8 @@ discoveries, not things the original dependency-free research could have anticip
 
 ### Phase 2 — foundational, moderate effort — ✅ ALL DONE, via anyhow instead of hand-rolled code
 
-Originally planned as std-only (no crates available at the time). Once the Artifactory proxy unblocked
-dependencies, item 4 was built directly on `anyhow` instead — exactly the substitution this doc's own
+Originally planned as std-only (no crates available at the time). Once the registry block lifted,
+item 4 was built directly on `anyhow` instead — exactly the substitution this doc's own
 Phase 3 "if the network block lifts" note predicted for this item specifically; applied here, once deps
 were confirmed working, rather than waiting.
 

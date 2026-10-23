@@ -10,34 +10,18 @@ A partial reimplementation of `gcloud storage` in Rust. Goal (see `README.md`): 
 Python-based `gcloud` CLI with a fast, reliable Rust CLI. **No longer dependency-free** — see below,
 this changed mid-project and invalidated the original constraint the research doc was written under.
 
-## Dependency constraint — RESOLVED, was previously blocking
+## Dependency constraint — resolved, no longer applicable
 
-Earlier sessions confirmed `static.crates.io` (the public crates.io CDN) returns HTTP 403 through the
-corporate proxy, and concluded no crates.io dependency could be linked. **That conclusion was wrong** —
-it conflated "the public CDN is blocked" with "no dependency can be added." Walmart runs an Artifactory
-proxy for crates.io, documented at
-[Cargo usage](https://confluence.walmart.com/pages/viewpage.action?pageId=3207638393). Pointing
-`[source.crates-io]` at it unblocks normal dependency downloads entirely:
+An earlier development environment for this project sat behind a network that blocked the public
+crates.io CDN outright, which required pointing `[source.crates-io]` at a private registry mirror via a
+repo-local `.cargo/config.toml`. That file has been removed from the repo — this is a public open-source
+project and builds against the plain public crates.io registry, with no special configuration needed.
 
-```toml
-# .cargo/config.toml
-[source.crates-io]
-registry = "sparse+https://cargo.ci.artifacts.walmart.com/artifactory/api/cargo/rust-lang-cargo-release-remote/index/"
-```
-
-**⚠️ `.cargo/config.toml` and `Cargo.lock` are untracked in git as of this writing** (`git status`
-shows both `??`). Source + `README.md` were committed (`4375875`), but without these two files a fresh
-clone cannot build — `cargo build` will hit the same 403 this section just described. Commit both
-before considering this done. (Flagged twice now — don't lose it a third time.)
-
-The original 403 finding itself was real and reproducible (confirmed independently via a direct `curl`
-against `static.crates.io`, with and without Cargo in the loop) — it just didn't mean what it was taken
-to mean. If `.cargo/config.toml` is ever missing/misconfigured, that exact symptom returns:
-
-```sh
-curl -sS -o /dev/null -w "%{http_code}\n" https://static.crates.io/crates/cfg-if/1.0.5/download
-# 403 == proxy not configured / not taking effect; 200 would mean the raw CDN itself opened up
-```
+If `cargo build` ever fails with an HTTP 403 fetching from `static.crates.io`, that's a sign of a
+restrictive local network, not a problem with this repo. Fix it with your own registry mirror configured
+locally (e.g. `~/.cargo/config.toml`, outside the repo and not committed) rather than reintroducing a
+project-committed override — a public repo shouldn't ship a config file that only works inside one
+network.
 
 ## Curl/jq/gcloud shell-outs — removed, replaced with crates
 
@@ -88,8 +72,8 @@ error body now surfaces, sanitized through the same `sanitize()` helper used for
 ## Prior research — don't re-derive, and don't get this wrong
 
 Before the CLI-patterns research (below), a separate pass read the real `gcloud` Python SDK source
-(present on this machine at `/Users/s0r0mzn/Downloads/gs/google-cloud-sdk/lib/surface/storage/` and
-`.../googlecloudsdk/command_lib/storage/`) to establish ground truth for `gcloud storage`'s actual flag
+(a local checkout of the Google Cloud SDK, under `lib/surface/storage/` and
+`lib/googlecloudsdk/command_lib/storage/`) to establish ground truth for `gcloud storage`'s actual flag
 surface. Two load-bearing facts from that pass:
 
 - **`-r` is overloaded and means something different per subcommand** — recursive for `cp`/`ls`/`rm`/
@@ -143,8 +127,8 @@ cargo run -q -- storage cat gs://cloud-samples-data/bigquery/us-states/us-states
 **`ls -r` output format is now byte-for-byte diffed against real `gcloud storage ls -r`**, not just
 spot-checked, across three distinct real-bucket shapes:
 
-1. A prefix with no folder-placeholder object (`gs://adtech-prod-offsite-ydsp-ingress/drop_zone/impressions/`,
-   253 lines including headers) — exact match.
+1. A prefix with no folder-placeholder object (`gs://BUCKET/prefix/`, a real bucket with
+   nested `date=.../v=.../file` structure, 253 lines including headers) — exact match.
 2. A prefix that *is* itself a folder-placeholder object (`gs://cloud-samples-data/bigquery/us-states/`) —
    exact match, including the extra bare top-line + blank line gcloud emits in this case (see Known bugs,
    now fixed, below).

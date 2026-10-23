@@ -19,8 +19,8 @@ real `gcloud` (~160x faster startup, ~3-10x faster end-to-end depending on comma
   - `gcloud auth login` with the `gcloud` CLI on `PATH` (fallback: shells out to
     `gcloud auth print-access-token`)
 
-HTTP and JSON are handled natively (`ureq`, `serde_json`) — no `curl`/`jq` shell-outs. On the
-Walmart network, crates.io downloads are proxied through Artifactory; see `.cargo/config.toml`.
+HTTP and JSON are handled natively (`ureq`, `serde_json`) — no `curl`/`jq` shell-outs. Dependencies
+come from the public crates.io registry; no special `.cargo/config.toml` is needed to build this repo.
 
 ## Build
 

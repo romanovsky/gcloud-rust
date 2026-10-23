@@ -3,8 +3,7 @@ use std::path::Path;
 
 use anyhow::{Context, bail};
 
-/// Native HTTP client using `ureq`, routed through the Walmart Artifactory
-/// crates.io proxy (see `.cargo/config.toml`) now that crate downloads work.
+/// Native HTTP client for the GCS JSON API, using `ureq`.
 ///
 /// `http_status_as_error(false)` is set on every request: ureq 3.x's default
 /// behavior collapses any 4xx/5xx into `Error::StatusCode(u16)`, which drops
