@@ -236,6 +236,23 @@ Full detail in `research-rust-cli-patterns.md`. Summary, now that it's been exec
   - Everything else in the original Phase 3 list (per-flag registry, `OsString` plumbing, "did you mean"
     suggestions, a `Run` trait, JSON output for `ls`) is still deferred, unchanged from the original
     research doc — none of their triggers have occurred.
+- **Homebrew distribution — in progress (`openspec/changes/brew-package`).** Done so far: CLI has
+  `--version`/`-V` (`src/cli.rs`, reads `env!("CARGO_PKG_VERSION")`); `.github/workflows/release.yml`
+  builds and publishes checksummed macOS binaries (`aarch64-apple-darwin`, `x86_64-apple-darwin`) as
+  GitHub Release assets on `v*` tag push. Remaining work, split by where it happens:
+  - **In this repo, paused pending explicit go-ahead**: push the dry-run tag (`v0.1.0-rc1`), verify the
+    pipeline end-to-end, delete it, then tag the first real release (`v0.1.0`). Paused because cutting a
+    tag/release is a publishing action on the public repo, and because `gh` on this machine is currently
+    authenticated against Walmart's GitHub Enterprise host, not public github.com — needs either
+    `gh auth login --hostname github.com` or an equivalent token before any `gh release` command against
+    `romanovsky/gcloud-rust` will work.
+  - **Outside this repo (follow-up change, not buildable here — outside this change's `allowedEditRoots`)**:
+    a new `homebrew-gcloud-rust` tap repository containing a Formula that points at this repo's release
+    tarballs/checksums once they exist. See `openspec/changes/brew-package/design.md`'s Decisions for the
+    intended shape (prebuilt-binary formula, `on_macos`/`Hardware.CPU.arm?` split per target, `test do`
+    asserting `--version`).
+  - **Not planned**: submitting to `homebrew-core` (doesn't meet its notability/stability bar at a
+    partial, 0.1.0, single-command-group reimplementation) and Linux binaries (v1 is macOS-only).
 
 ## Repo / git state
 

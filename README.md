@@ -46,6 +46,22 @@ cargo run -- storage rm gs://bucket/object
 
 Run `cargo run -- storage <command> --help` for per-command flag details.
 
+## Releases
+
+Pushing a `v*` tag (e.g. `v0.1.0`) triggers `.github/workflows/release.yml`, which builds, checksums,
+and publishes macOS binaries (`aarch64-apple-darwin`, `x86_64-apple-darwin`) as GitHub Release assets.
+Every binary reports its own version:
+
+```sh
+gcloud-rust --version   # or -V
+```
+
+**Homebrew install isn't available yet** — it depends on a separate `homebrew-gcloud-rust` tap
+repository (outside this repo) that hasn't been created yet. Until then, either build from source (see
+Build above) or grab a release tarball from the
+[Releases page](https://github.com/romanovsky/gcloud-rust/releases), verify its `.sha256`, and put the
+extracted binary on `PATH`.
+
 ## Status
 
 `gcloud` has ~135 top-level command groups. Only `storage` is covered so far.
@@ -53,6 +69,9 @@ Run `cargo run -- storage <command> --help` for per-command flag details.
 | Command group | Status |
 |---|---|
 | `storage` | 🟡 Partial — `ls`, `cat`, `cp`, `rm` (see [Run](#run)) |
+
+Release binaries (see [Releases](#releases)) currently target macOS only (`aarch64-apple-darwin`,
+`x86_64-apple-darwin`); Linux is a possible future addition, not implemented today.
 
 ### Not started
 
