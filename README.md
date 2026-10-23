@@ -7,6 +7,9 @@ A partial reimplementation of `gcloud` in Rust.
 Replace the Python-based `gcloud` CLI with a fast, reliable Rust CLI — same commands, a fraction
 of the startup latency and no Python runtime/venv to manage.
 
+See [docs/Performance-testing-results.md](docs/Performance-testing-results.md) for measurements against
+real `gcloud` (~160x faster startup, ~3-10x faster end-to-end depending on command).
+
 ## Requirements
 
 - Rust / Cargo (edition 2024)
