@@ -243,7 +243,7 @@ Full detail in `research-rust-cli-patterns.md`. Summary, now that it's been exec
   - **In this repo, paused pending explicit go-ahead**: push the dry-run tag (`v0.1.0-rc1`), verify the
     pipeline end-to-end, delete it, then tag the first real release (`v0.1.0`). Paused because cutting a
     tag/release is a publishing action on the public repo, and because `gh` on this machine is currently
-    authenticated against Walmart's GitHub Enterprise host, not public github.com — needs either
+    authenticated against a company-internal GitHub Enterprise host, not public github.com — needs either
     `gh auth login --hostname github.com` or an equivalent token before any `gh release` command against
     `romanovsky/gcloud-rust` will work.
   - **Outside this repo (follow-up change, not buildable here — outside this change's `allowedEditRoots`)**:

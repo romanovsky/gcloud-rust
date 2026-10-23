@@ -20,9 +20,9 @@ A clean checkout of the repository SHALL build successfully (`cargo build --rele
 the public crates.io registry, with no dependency on network endpoints reachable from inside one
 company's network only.
 
-#### Scenario: build from a machine with no access to Walmart's internal network
+#### Scenario: build from a machine with no access to the internal registry host
 - **WHEN** `cargo build --release` is run from a fresh clone, on a machine that cannot reach
-  Walmart-internal hosts
+  the internal-only registry host
 - **THEN** the build completes successfully, resolving dependencies through the public crates.io
   registry
 

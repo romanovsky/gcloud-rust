@@ -6,7 +6,7 @@ See `proposal.md` - Why/What Changes for motivation. Relevant current state:
   tags — there has never been a release.
 - `Cargo.toml` is at `version = "0.1.0"`. The CLI has no `--version`/`-V` handling today.
 - `.cargo/config.toml` is committed on `origin/main` (confirmed) and unconditionally overrides
-  `[source.crates-io]` to a Walmart-internal Artifactory proxy. Confirmed this breaks `cargo build` for
+  `[source.crates-io]` to an internal-only registry proxy. Confirmed this breaks `cargo build` for
   anyone/anything without access to that host — including GitHub Actions runners, which this change
   depends on. `Cargo.lock` being committed doesn't change this: cargo still fetches `.crate` files from
   whatever registry `[source.crates-io]` resolves to.
@@ -16,8 +16,8 @@ See `proposal.md` - Why/What Changes for motivation. Relevant current state:
 
 **Goals:**
 - Produce checksummed, runnable macOS release binaries automatically from a pushed version tag.
-- Make the repository buildable by something with no Walmart network access (a prerequisite for the
-  above, not a separate feature).
+- Make the repository buildable by something with no access to that internal network (a prerequisite
+  for the above, not a separate feature).
 - Give the CLI a `--version` flag so both the release pipeline and the (future) Homebrew formula's test
   block have something to verify against.
 
@@ -30,8 +30,8 @@ See `proposal.md` - Why/What Changes for motivation. Relevant current state:
   additive to the CI matrix, not a breaking change to anything built here.
 - Submitting to `homebrew-core`. A partial, 0.1.0, single-command-group reimplementation doesn't meet its
   notability/stability bar; revisit once the project covers more of `gcloud`'s surface.
-- Redesigning how Walmart-network developers fetch dependencies in general. This change only moves the
-  Artifactory override from committed to developer-local; it doesn't change the proxy itself or how it
+- Redesigning how developers on that internal network fetch dependencies in general. This change only moves the
+  registry override from committed to developer-local; it doesn't change the proxy itself or how it
   was discovered (see `STATE.md`'s existing dependency-constraint section).
 
 ## Decisions
@@ -50,11 +50,11 @@ architectures from one toolchain, so `rustup target add x86_64-apple-darwin` plu
 tool is for cross-*OS* targets, e.g. Linux from a non-Linux host; not needed for Darwin-on-Darwin).
 
 **Remove the committed `.cargo/config.toml` entirely; no "conditional" version.** Considered keeping a
-conditional override (e.g., only apply the Artifactory redirect when some env var is set) — not
+conditional override (e.g., only apply the registry redirect when some env var is set) — not
 achievable: cargo's `[source.crates-io]` replacement in `.cargo/config.toml` is static TOML, resolved the
 same way for every invocation that sees the file; there's no built-in "fall back to the public registry if
-the replacement is unreachable." The only way a public repo builds cleanly outside Walmart's network is to
-not ship a universal override in the repo at all. Walmart-network contributors (including this
+the replacement is unreachable." The only way a public repo builds cleanly outside that internal network is to
+not ship a universal override in the repo at all. Contributors on that network (including this
 machine, going forward) need the same one-line snippet in their own `~/.cargo/config.toml` (global, not
 repo-local, so it's never at risk of being committed again) — documented in `README.md` and `STATE.md`.
 
@@ -72,7 +72,7 @@ values directly rather than recomputing them.
 ## Risks / Trade-offs
 
 - **[Risk]** Removing `.cargo/config.toml` could silently break `cargo build` for any other
-  Walmart-network contributor who doesn't see the doc update → **Mitigation**: the failure mode (403 from
+  contributor on that internal network who doesn't see the doc update → **Mitigation**: the failure mode (403 from
   `static.crates.io`) is already diagnosed and documented in `STATE.md`'s existing dependency-constraint
   section; the fix is copy-pasting the same snippet to `~/.cargo/config.toml`, documented in both
   `README.md` and `STATE.md` as part of this change.
@@ -93,7 +93,7 @@ values directly rather than recomputing them.
 ## Migration Plan
 
 1. Add `--version`/`-V` handling; verify locally.
-2. Remove `.cargo/config.toml` from git tracking; add the Walmart-local-override instructions to
+2. Remove `.cargo/config.toml` from git tracking; add the local-override instructions to
    `README.md` and `STATE.md`; verify `cargo build` still works on this machine (uses the existing warm
    `~/.cargo/registry` cache plus a newly-added personal global override).
 3. Add `.github/workflows/release.yml`.

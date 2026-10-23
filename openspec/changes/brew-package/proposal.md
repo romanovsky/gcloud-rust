@@ -8,9 +8,9 @@ how the comparable Rust CLI tools this project's own design research is modeled 
 eza, zoxide) are distributed.
 
 Shipping via Homebrew surfaced a blocking, pre-existing problem worth fixing regardless: this repo's
-committed `.cargo/config.toml` unconditionally redirects crate downloads to a Walmart-internal Artifactory
-proxy (`cargo.ci.artifacts.walmart.com`). That host is unreachable from outside Walmart's network —
-including GitHub Actions, which any binary-release pipeline needs. Confirmed on `origin/main`: the file is
+committed `.cargo/config.toml` unconditionally redirects crate downloads to an internal-only registry
+proxy, reachable only from inside one company's network. That host is unreachable from outside that
+network — including GitHub Actions, which any binary-release pipeline needs. Confirmed on `origin/main`: the file is
 committed as-is, and `Cargo.lock` being committed alongside it does not help, since cargo still fetches
 `.crate` files from whatever registry `[source.crates-io]` names. Public CI cannot build this repo today.
 
@@ -19,9 +19,9 @@ committed as-is, and `Cargo.lock` being committed alongside it does not help, si
 - Add a `--version`/`-V` flag to the CLI (currently has none) — needed so the Homebrew formula's
   standard `test do` block has something to assert against, and so users/support can tell what they have
   installed.
-- **BREAKING for Walmart-network zero-config builds**: remove the repo-committed `.cargo/config.toml`
-  Artifactory override. A public, externally-buildable repo can't ship a config file that only works
-  inside one company's network. Walmart-network contributors will need their own local override (same
+- **BREAKING for zero-config builds on that internal network**: remove the repo-committed
+  `.cargo/config.toml` registry override. A public, externally-buildable repo can't ship a config file
+  that only works inside one company's network. Contributors on that network will need their own local override (same
   one-line snippet, moved to an uncommitted `~/.cargo/config.toml` or a gitignored repo-local one) —
   documented in `README.md` and `STATE.md` so this isn't a silent regression for the existing workflow.
 - Add a GitHub Actions release workflow (`.github/workflows/release.yml`): on pushing a `v*` tag, build
@@ -52,7 +52,7 @@ committed as-is, and `Cargo.lock` being committed alongside it does not help, si
 
 - `src/cli.rs` / `src/main.rs`: new `--version`/`-V` handling.
 - `.cargo/config.toml`: removed from the repo (currently committed; see BREAKING note above).
-- `README.md`, `docs/prompts/refactor/state/STATE.md`: updated with the relocated Artifactory-override
+- `README.md`, `docs/prompts/refactor/state/STATE.md`: updated with the relocated registry-override
   guidance, install instructions, and release process.
 - New: `.github/workflows/release.yml`.
 - New: a `v0.1.0` git tag and its corresponding GitHub Release + binary assets.
